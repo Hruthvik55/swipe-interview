@@ -13,131 +13,177 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const upload = multer({ dest: "uploads/" });
+// ----------------------------------------
+// ALWAYS STORE INSIDE BACKEND/uploads
+// ----------------------------------------
+const uploadsRoot = path.join(__dirname, "uploads");
+const pendingDir = path.join(uploadsRoot, "pending");
+const screenedDir = path.join(uploadsRoot, "screened");
+const tmpDir = path.join(uploadsRoot, "tmp");
 
-// -------------------------------------
-// OCR + TEXT EXTRACTION
-// -------------------------------------
-async function extractText(file) {
-  const buffer = fs.readFileSync(file.path);
-  const ext = path.extname(file.originalname).toLowerCase();
+// create folders
+[uploadsRoot, pendingDir, screenedDir, tmpDir].forEach((d) => {
+  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+});
 
-  try {
-    if (ext === ".pdf") {
-      const data = await pdfParse(buffer);
-      if (data.text && data.text.trim().length > 30) {
-        console.log("📄 Extracted PDF text");
-        return data.text;
-      }
-      console.log("🤖 PDF text too little → switching to OCR");
-    }
+const upload = multer({ dest: tmpDir });
 
-    if (ext === ".docx" || ext === ".doc") {
-      const result = await mammoth.extractRawText({ buffer });
-      if (result.value.trim().length > 20) {
-        console.log("📄 Extracted DOCX text");
-        return result.value;
-      }
-      console.log("🤖 DOCX text too small → switching to OCR");
-    }
-  } catch (err) {
-    console.log("⚠️ Primary extraction failed:", err.message);
-  }
+// ----------------------------------------
+// BASIC INFO
+// ----------------------------------------
 
-  // OCR fallback
-  console.log("🧠 Running OCR fallback…");
 
-  const imgPath = path.join(__dirname, "ocr_page.png");
 
-  try {
-    await pdfPoppler.convert(file.path, {
-      format: "png",
-      out_dir: __dirname,
-      out_prefix: "ocr_page",
-      page: 1,
-    });
+// function extractBasicInfo(text) {
+//   const email =
+//     text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/)?.[0] || "";
+//   const phone = text.match(/(\+?\d[\d\s-]{8,15})/)?.[0] || "";
+//   const name = text.split("\n")[0]?.trim() || "Unknown";
+//   return { name, email, phone };
+// }
 
-    console.log("📸 PDF → PNG conversion done, applying OCR…");
-
-    const result = await Tesseract.recognize(imgPath, "eng");
-    fs.unlinkSync(imgPath);
-
-    console.log("✅ OCR complete");
-    return result.data.text;
-  } catch (err) {
-    console.log("❌ OCR failed:", err.message);
-    return "";
-  }
-}
-
-// -------------------------------------
-// Extract Name / Email / Phone
-// -------------------------------------
 function extractBasicInfo(text) {
+  if (!text) return { name: "Unknown", email: "", phone: "" };
+
+  const lines = text
+    .split("\n")
+    .map(l => l.trim())
+    .filter(Boolean);
+
+  // EMAIL
   const email =
     text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/)?.[0] || "";
 
-  const phone =
-    text.match(/(\+?\d[\d\s-]{8,15})/)?.[0]?.trim() || "";
+  // PHONE
+  const phone = text.match(/(\+?\d[\d\s-]{8,15})/)?.[0] || "";
 
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  // NAME — improved extraction
   let name = "Unknown";
-  if (lines.length > 0) name = lines[0].split(" ").slice(0, 3).join(" ");
+
+  for (let line of lines) {
+    if (
+      /^[A-Za-z\s]+$/.test(line) && // only letters & spaces
+      line.split(" ").length >= 2 &&
+      line.split(" ").length <= 4 &&
+      !line.toLowerCase().includes("resume") &&
+      !line.toLowerCase().includes("curriculum") &&
+      !line.toLowerCase().includes("vitae")
+    ) {
+      name = line;
+      break;
+    }
+  }
 
   return { name, email, phone };
 }
 
-// -------------------------------------
-// Keyword Score
-// -------------------------------------
-function keywordScore(resumeText, jdText) {
-  const jdWords = jdText.toLowerCase().split(/\W+/).filter(Boolean);
-  const resumeWords = resumeText.toLowerCase().split(/\W+/);
-  const resumeSet = new Set(resumeWords);
 
-  let matches = 0;
-  jdWords.forEach((word) => {
-    if (resumeSet.has(word)) matches++;
+
+// ----------------------------------------
+// TEXT EXTRACTION
+// ----------------------------------------
+async function extractText(file) {
+  let buffer;
+  try {
+    buffer = fs.readFileSync(file.path);
+  } catch {
+    return "";
+  }
+
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  // PDF
+  if (ext === ".pdf") {
+    try {
+      const data = await pdfParse(buffer);
+      if (data.text.trim().length > 20) return data.text;
+    } catch {}
+  }
+
+  // DOCX
+  if (ext === ".docx") {
+    try {
+      const result = await mammoth.extractRawText({ buffer });
+      if (result.value.trim().length > 20) return result.value;
+    } catch {}
+  }
+
+  // OCR fallback
+  const prefix = "ocr_" + Date.now();
+  await pdfPoppler.convert(file.path, {
+    format: "png",
+    out_dir: tmpDir,
+    out_prefix: prefix,
+    page: 1,
   });
 
-  return Math.round((matches / jdWords.length) * 100 || 0);
+  const png = fs
+    .readdirSync(tmpDir)
+    .find((f) => f.startsWith(prefix) && f.endsWith(".png"));
+  if (!png) return "";
+
+  const result = await Tesseract.recognize(path.join(tmpDir, png), "eng");
+  fs.unlinkSync(path.join(tmpDir, png));
+
+  return result.data.text || "";
 }
 
-// -------------------------------------
-// Resume Screening API
-// -------------------------------------
-app.post("/api/screen", upload.array("resumes"), async (req, res) => {
-  console.log("🔥 API HIT: /api/screen");
+// ----------------------------------------
+// ROUTES
+// ----------------------------------------
 
-  try {
-    const jdText = req.body.jobDescription || "";
-    const files = req.files;
+// upload resume
+app.post("/api/upload-resume", upload.single("resume"), (req, res) => {
+  const file = req.file;
+  if (!file) return res.json({ ok: false });
 
-    let results = [];
+  const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const final = path.join(pendingDir, safe);
 
-    for (let file of files) {
-      const resumeText = await extractText(file);
-      const score = keywordScore(resumeText, jdText);
+  fs.renameSync(file.path, final);
 
-      const basic = extractBasicInfo(resumeText);
+  console.log("📥 Stored:", safe);
 
-      results.push({
-        filename: file.originalname,
-        keywordScore: score,
-        name: basic.name,
-        email: basic.email,
-        phone: basic.phone,
-      });
-
-      fs.unlinkSync(file.path);
-    }
-
-    res.json({ ok: true, results });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
+  return res.json({ ok: true, filename: safe });
 });
 
-// -------------------------------------
-const PORT = 5000;
-app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));
+// list pending
+app.get("/api/resumes", (req, res) => {
+  const files = fs.readdirSync(pendingDir);
+  return res.json({
+    ok: true,
+    resumes: files.map((f) => ({ filename: f })),
+  });
+});
+
+// screen one
+app.post("/api/screen", async (req, res) => {
+  const filename = req.query.file;
+  const filePath = path.join(pendingDir, filename);
+
+  if (!fs.existsSync(filePath))
+    return res.json({ ok: false, msg: "File missing" });
+
+  const fakeFile = { path: filePath, originalname: filename };
+
+  const text = await extractText(fakeFile);
+  const info = extractBasicInfo(text);
+  const score = 50; // test value
+
+  fs.renameSync(filePath, path.join(screenedDir, filename));
+
+  return res.json({
+    ok: true,
+    results: [
+      {
+        filename,
+        name: info.name,
+        email: info.email,
+        phone: info.phone,
+        keywordScore: score,
+      },
+    ],
+  });
+});
+
+app.listen(5000, () => console.log("🚀 Backend running on 5000"));

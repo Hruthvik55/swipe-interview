@@ -26,7 +26,7 @@ const Interviewer = () => {
     { title: ' Email', dataIndex: 'email', key: 'email' },
     { title: ' Phone', dataIndex: 'phone', key: 'phone' },
     {
-      title: '⭐ Score',
+      title: 'Score',
       dataIndex: 'score',
       key: 'score',
       render: (score) => getScoreTag(score),

@@ -1,127 +1,162 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { Button, Table, message, Space } from "antd";
 import { useDispatch, useSelector } from "react-redux";
 import { addCandidate } from "../slices/sessionSlice";
-import { Card, Button, Typography, message } from "antd";
-
-const { Title, Text } = Typography;
 
 export default function ScreenResumes() {
-  const dispatch = useDispatch();
-  const storedJD = useSelector((state) => state.jd.description); // 🔥 Get JD from Redux
   const [resumes, setResumes] = useState([]);
-  const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
+  const dispatch = useDispatch();
 
-  // ❗ Block if JD not set
-  if (!storedJD) {
-    return (
-      <div style={{ padding: 30 }}>
-        <Card>
-          <Title level={3}>Job Description Not Set</Title>
-          <Text type="secondary">
-            Please go to <b>Set JD</b> page and save a Job Description before screening resumes.
-          </Text>
-        </Card>
-      </div>
-    );
-  }
+  // if you have JD stored in redux, use it; otherwise fallback to default
+  const jd = useSelector((state) => state.jd?.description) || "default JD";
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!resumes.length) return message.error("Upload at least one resume!");
-
-    setLoading(true);
-
-    const formData = new FormData();
-    resumes.forEach((file) => formData.append("resumes", file));
-
-    // 🔥 Send stored JD
-    formData.append("jobDescription", storedJD);
-
-    const resp = await fetch("http://localhost:5000/api/screen", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await resp.json();
-    setResults(data.results || []);
-    setLoading(false);
-
-    // 🔥 Push candidates into dashboard
-    data.results.forEach((res) => {
-      dispatch(
-        addCandidate({
-          name: res.name,
-          email: res.email,
-          phone: res.phone,
-          score: res.keywordScore,
-          answers: [], // no interview answers
-        })
-      );
-    });
+  // Fetch pending resumes
+  const loadResumes = async () => {
+    try {
+      const resp = await fetch("http://localhost:5000/api/resumes");
+      const data = await resp.json();
+      if (data.ok) {
+        setResumes(data.resumes || []);
+      } else {
+        setResumes([]);
+      }
+    } catch (err) {
+      console.error("Load resumes error:", err);
+      message.error("Failed to load resumes");
+    }
   };
 
-  return (
-    <div style={{ padding: "20px" }}>
-      <Card>
-        <Title level={3}>Resume Screening Agent</Title>
+  useEffect(() => {
+    loadResumes();
+  }, []);
 
-        {/* SHOW CURRENT JD */}
-        <div
-          style={{
-            padding: "15px",
-            background: "#f7f7f7",
-            borderRadius: "6px",
-            marginBottom: "20px",
-          }}
-        >
-          <Title level={5}>Current Job Description</Title>
-          <Text>{storedJD}</Text>
-        </div>
+  // Screen a single resume (stored pending file)
+  const screenResume = async (filename) => {
+    setLoading(true);
+    try {
+      const resp = await fetch(
+        `http://localhost:5000/api/screen?file=${encodeURIComponent(filename)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobDescription: jd }),
+        }
+      );
 
-        <form onSubmit={handleSubmit}>
-          <label><b>Upload Resumes (PDF/DOCX/TXT):</b></label> <br />
-          <input
-            type="file"
-            multiple
-            onChange={(e) => setResumes([...e.target.files])}
-          />
+      const data = await resp.json();
+      setLoading(false);
 
-          <br /><br />
+      if (!data.ok) {
+        message.error(data.msg || "Screening failed");
+        return;
+      }
 
-          <Button type="primary" htmlType="submit" disabled={loading}>
-            {loading ? "Screening..." : "Screen Resumes"}
+      // data.results is an array (single element here)
+      (data.results || []).forEach((r) => {
+        dispatch(
+          addCandidate({
+            name: r.name || r.filename,
+            email: r.email || "N/A",
+            phone: r.phone || "N/A",
+            score: r.keywordScore ?? 0,
+            answers: [],
+          })
+        );
+      });
+
+      message.success(`Screened: ${filename}`);
+      // refresh list (moved to screened by backend)
+      loadResumes();
+    } catch (err) {
+      console.error("Screen single error:", err);
+      setLoading(false);
+      message.error("Error screening resume");
+    }
+  };
+
+  // Screen all pending resumes
+  const screenAll = async () => {
+    if (!resumes.length) {
+      message.info("No pending resumes to screen");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const resp = await fetch("http://localhost:5000/api/screen-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobDescription: jd }),
+      });
+
+      const data = await resp.json();
+      setLoading(false);
+
+      if (!data.ok) {
+        message.error(data.msg || "Screening all failed");
+        return;
+      }
+
+      (data.results || []).forEach((r) => {
+        dispatch(
+          addCandidate({
+            name: r.name || r.filename,
+            email: r.email || "N/A",
+            phone: r.phone || "N/A",
+            score: r.keywordScore ?? 0,
+            answers: [],
+          })
+        );
+      });
+
+      message.success("All resumes screened");
+      loadResumes();
+    } catch (err) {
+      console.error("Screen all error:", err);
+      setLoading(false);
+      message.error("Error screening resumes");
+    }
+  };
+
+  const columns = [
+    { title: "Filename", dataIndex: "filename", key: "filename" },
+    {
+      title: "Actions",
+      key: "actions",
+      render: (_, record) => (
+        <Space>
+          <Button
+            type="primary"
+            onClick={() => screenResume(record.filename)}
+            loading={loading}
+            size="small"
+          >
+            Screen
           </Button>
-        </form>
-      </Card>
+        </Space>
+      ),
+    },
+  ];
 
-      {results.length > 0 && (
-        <Card style={{ marginTop: "30px" }}>
-          <Title level={4}>Results</Title>
-          <table border="1" cellPadding="8" style={{ width: "100%" }}>
-            <thead>
-              <tr>
-                <th>Filename</th>
-                <th>Name</th>
-                <th>Email</th>
-                <th>Phone</th>
-                <th>Score</th>
-              </tr>
-            </thead>
-            <tbody>
-              {results.map((r, index) => (
-                <tr key={index}>
-                  <td>{r.filename}</td>
-                  <td>{r.name}</td>
-                  <td>{r.email}</td>
-                  <td>{r.phone}</td>
-                  <td>{r.keywordScore}%</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Card>
-      )}
+  return (
+    <div style={{ padding: 20 }}>
+      <h2>Pending Resumes</h2>
+
+      <Button
+        type="primary"
+        onClick={screenAll}
+        loading={loading}
+        style={{ marginBottom: 16 }}
+      >
+        Screen All Resumes
+      </Button>
+
+      <Table
+        dataSource={resumes.map((r, i) => ({ ...r, key: i }))}
+        columns={columns}
+        pagination={false}
+      />
     </div>
   );
 }
